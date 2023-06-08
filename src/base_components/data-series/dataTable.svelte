@@ -1,0 +1,1311 @@
+<script>
+    import Fa from "svelte-fa";
+    import { fly } from "svelte/transition";
+    import {
+        faAngleDown,
+        faBars,
+        faCheck,
+        faEdit,
+        faEye,
+        faMagnifyingGlass,
+        faPlus,
+        faTimes,
+        faTrash,
+    } from "@fortawesome/free-solid-svg-icons";
+    import { beforeUpdate, createEventDispatcher, onMount } from "svelte";
+    import { disableNonNumericInput, sleep } from "$src/lib/js/utilities/helpers";
+    import Dropdown from "$src/base_components/data-series/ui-elements/dropdown.svelte";
+
+    export let httpRequestType = "POST";
+    export let dataSource;
+    export let dataSourceDelaySimulation = 0; //ms
+    export let dataSourceReturnProp = "data";
+    export let dataSourceFooterReturnProp = "footer";
+    export let dataSourceIncludeCredentials = false;
+    export let dataSourceCountReturnProp = "count";
+    export let itemsPerPage = 10;
+    export let pageNumber = 0;
+    export let enableMultiSelect = true;
+    export let enableGlobalSearch = true;
+    export let initialGlobalSearch = "";
+    export let clickableColumn = undefined;
+    export let enableRefresh = true;
+    export let enableFilters = false;
+    export let tableMinWidth = "1400px";
+
+    /**
+     * Any additional post body params needed for your HTTP request
+     * @type {{}}
+     */
+    export let additionalPostBodyParams = {};
+
+    export let multiActionsColumnWidth = 3;
+    export let customActionsColumnWidth = 9;
+    const multiActionsColumnMinWidth = multiActionsColumnWidth;
+    const customActionsColumnMinWidth = customActionsColumnWidth;
+
+    export let enableNewButton = true;
+    export let newButtonOptions = {
+        btnClasses: "",
+        faIcon: faPlus,
+        displayLabel: "New",
+        faClasses: "sm:mr-2",
+        clickEvent: "add_new_clicked",
+    };
+
+    export let columns = undefined;
+    export let customActions = {};
+    export let multiSelectActions = [];
+    export let footerColumns = {};
+
+    export let showFilters = false;
+
+    let headerHeight;
+    let topButtonsHeight;
+    export let tableHeightPadding = "0";
+
+    let postBody = {};
+
+    let editingLimit = false;
+
+    let sortBy;
+    let isSortAscending = true;
+    let rotateDegrees = [0, 180];
+
+    let currentPage = [];
+    let totalItemCount;
+    let totalPagesCount;
+
+    let paginationOptions = [];
+
+    let selectedRows = {};
+    let allSelected = false;
+
+    let isLoading = false;
+    let noResultsFound = true;
+
+    let initComplete = false;
+
+    const dispatch = createEventDispatcher();
+    const actionTriggered = (params) => {
+        dispatch("actionTriggered", params);
+    };
+
+    const requestPendingStates = {
+        globalSearch: {
+            loading: false,
+            visible: false,
+        },
+        editLimit: {
+            loading: false,
+            visible: false,
+        },
+        refresh: {
+            loading: false,
+            visible: false,
+        },
+        pagination: {
+            loading: false,
+        },
+        filters: {}, // Populated dynamically based on incoming data
+    };
+
+    const handleGeneralStates = async (type) => {
+        requestPendingStates[type].visible = true;
+        requestPendingStates[type].loading = true;
+
+        await refreshDataTable();
+
+        requestPendingStates[type].visible = false;
+        requestPendingStates[type].loading = false;
+    };
+
+    const handleSortBy = async (columnName) => {
+        if (isLoading) {
+            return;
+        }
+
+        sortBy = columnName;
+        isSortAscending = !isSortAscending;
+
+        columns.find((column) => {
+            postBody.columns[column.dataSourceAttributeName].sortBy = false;
+            if (column.dataSourceAttributeName === columnName) {
+                postBody.columns[column.dataSourceAttributeName].sortBy = true;
+                postBody.columns[column.dataSourceAttributeName].isSortAscending = isSortAscending;
+            }
+        });
+
+        await refreshDataTable();
+    };
+
+    const handleFilterBy = async (columnName, filterName) => {
+        if (isLoading) {
+            return;
+        }
+
+        requestPendingStates.filters[columnName][filterName].loading = true;
+
+        await refreshDataTable();
+
+        requestPendingStates.filters[columnName][filterName].loading = false;
+        requestPendingStates.filters[columnName][filterName].visible = false;
+    };
+
+    export const refreshDataTable = async () => {
+        isLoading = true;
+
+        if (dataSourceDelaySimulation > 0) {
+            await sleep(() => {}, dataSourceDelaySimulation);
+        }
+
+        postBody.limit = parseInt(postBody.itemsPerPage);
+        postBody.offset = postBody.pageNumber * parseInt(postBody.itemsPerPage);
+
+        for (const [paramName, paramValue] of Object.entries(additionalPostBodyParams)) {
+            postBody[paramName] = paramValue;
+        }
+
+        let response;
+        if (httpRequestType === "GET") {
+            let encodedPostBody = encodeURIComponent(JSON.stringify(postBody));
+
+            response = await fetch(dataSource + "?encodedPostBody=" + encodedPostBody, {
+                method: httpRequestType,
+                headers: {
+                    Accept: "application/json",
+                    "Content-Type": "application/json",
+                },
+                credentials: dataSourceIncludeCredentials ? "include" : "omit",
+            });
+        } else if (httpRequestType === "POST") {
+            response = await fetch(dataSource, {
+                method: httpRequestType,
+                headers: {
+                    Accept: "application/json",
+                    "Content-Type": "application/json",
+                },
+                credentials: dataSourceIncludeCredentials ? "include" : "omit",
+                body: JSON.stringify(postBody),
+            });
+        } else {
+            throw Error("Allowed HTTP request types are only 'POST' and 'GET'. Provided: " + httpRequestType);
+        }
+
+        let data = await response.json();
+
+        if (typeof data[dataSourceReturnProp] === "undefined") {
+            throw new Error("dataSourceReturnProp '" + dataSourceReturnProp + "' is not defined on the fetch result");
+        }
+        currentPage = data[dataSourceReturnProp];
+        currentPage.forEach((row, index) => {
+            selectedRows[row.id] = false;
+        });
+
+        if (currentPage.length < 1) {
+            let currentRow = {};
+            currentRow.id = -1;
+            Object.keys(postBody.columns).forEach((columnName) => {
+                currentRow[columnName] = "No results";
+            });
+            currentPage.push(currentRow);
+            actionTriggered({ clickEvent: "no_results_found" });
+        } else {
+            noResultsFound = false;
+        }
+
+        if (typeof data[dataSourceCountReturnProp] === "undefined") {
+            throw new Error(
+                "dataSourceCountReturnProp '" + dataSourceCountReturnProp + "' is not defined on the fetch result"
+            );
+        }
+
+        totalItemCount = data[dataSourceCountReturnProp];
+        totalPagesCount = Math.ceil(totalItemCount / postBody.itemsPerPage);
+
+        if (typeof data[dataSourceFooterReturnProp] !== "undefined") {
+            footerColumns = data[dataSourceFooterReturnProp];
+        }
+
+        paginationOptions = buildPaginationOptions();
+        isLoading = false;
+    };
+
+    const updateSelected = (allSelected) => {
+        Object.keys(selectedRows).forEach((key) => {
+            selectedRows[key] = allSelected;
+        });
+    };
+
+    onMount(async () => {
+        requestPendingStates.pagination.loading = true;
+        await refreshDataTable();
+        requestPendingStates.pagination.loading = false;
+    });
+
+    beforeUpdate(async () => {
+        if (!initComplete) {
+            initComplete = true;
+            await initPostBody();
+            await handleColWidths();
+        }
+    });
+
+    const resetPostBody = async () => {
+        sortBy = undefined;
+        isSortAscending = true;
+
+        postBody.searchValue = "";
+
+        columns.forEach((column, index) => {
+            postBody.columns[column.dataSourceAttributeName].isSortAscending = column.isSortAscending;
+            postBody.columns[column.dataSourceAttributeName].sortBy = column.sortBy;
+
+            if (column.hasOwnProperty("filterBy")) {
+                for (const [filterByName, filterByInfo] of Object.entries(column.filterBy)) {
+                    postBody.columns[column.dataSourceAttributeName].filterBy[filterByName] = filterByInfo.userInput;
+                }
+            }
+        });
+    };
+
+    const initPostBody = async () => {
+        if (dataSource === undefined) {
+            throw Error("dataSource has not been provided");
+        }
+
+        if (columns === undefined) {
+            throw Error("columns have not been provided");
+        }
+
+        if (!enableGlobalSearch) {
+            initialGlobalSearch = "";
+        }
+
+        postBody.searchValue = initialGlobalSearch;
+        postBody.itemsPerPage = itemsPerPage;
+        postBody.pageNumber = pageNumber;
+        postBody.columns = {};
+
+        columns.forEach((column, index) => {
+            postBody.columns[column.dataSourceAttributeName] = {};
+            postBody.columns[column.dataSourceAttributeName].isSortAscending = column.isSortAscending;
+            postBody.columns[column.dataSourceAttributeName].sortBy = column.sortBy;
+
+            requestPendingStates.filters[column.dataSourceAttributeName] = {};
+
+            postBody.columns[column.dataSourceAttributeName].filterBy = {};
+            if (column.hasOwnProperty("filterBy")) {
+                for (const [filterName, filterByInfo] of Object.entries(column.filterBy)) {
+                    postBody.columns[column.dataSourceAttributeName].filterBy[filterName] = filterByInfo.userInput;
+
+                    requestPendingStates.filters[column.dataSourceAttributeName][filterName] = {};
+                    requestPendingStates.filters[column.dataSourceAttributeName][filterName].loading = false;
+                    requestPendingStates.filters[column.dataSourceAttributeName][filterName].visible = false;
+                }
+            } else {
+                postBody.columns[column.dataSourceAttributeName].filterBy = {};
+            }
+        });
+
+        if (!enableFilters) {
+            showFilters = false;
+        }
+    };
+
+    //#region Pagination
+
+    const buildPaginationOptions = () => {
+        return Array.from(Array(totalPagesCount === 0 ? 1 : totalPagesCount).keys()).map((_, index) => {
+            return {
+                params: { pageNumber: index },
+                displayLabel: "Page " + (index + 1).toString(),
+                clickEvent: "page_clicked",
+            };
+        });
+    };
+
+    const handlePaginate = async (newPageNumber) => {
+        if (isLoading) {
+            return;
+        }
+
+        paginationOptions = [];
+        postBody.pageNumber = newPageNumber;
+        postBody.offset = postBody.itemsPerPage * (postBody.pageNumber - 1);
+        requestPendingStates.pagination.loading = true;
+        await refreshDataTable();
+        requestPendingStates.pagination.loading = false;
+    };
+    //#endregion
+
+    //#region Clicks
+    const handleRowClick = (event, rowId) => {
+        actionTriggered({ clickEvent: "row_clicked", rowId: rowId });
+        console.log("row clicked: ", rowId);
+    };
+
+    const handleCustomActionClick = (event, customAction, rowId) => {
+        actionTriggered({ clickEvent: customAction, rowId: rowId });
+        event.stopPropagation(); // Stops the click on table row element
+        console.log(`${customAction} clicked: `, rowId);
+    };
+
+    const handleMultiSelect = (event) => {
+        let selectedRowIds = Object.keys(selectedRows).filter((key) => {
+            return selectedRows[key];
+        });
+
+        actionTriggered({ clickEvent: event.detail.clickEvent, rowIds: selectedRowIds });
+        console.log(`${event.detail.clickEvent}: `, selectedRowIds);
+    };
+    //endregion
+
+    //#region Column Widths
+    // Handles dynamic scaling of data columns bases on provided widths, or defaults to generic auto HTML table scaling
+    const handleColWidths = async () => {
+        let takenUpWidth = 0;
+
+        if (enableMultiSelect) {
+            takenUpWidth += multiActionsColumnWidth;
+        }
+
+        if (Object.keys(customActions).length > 0) {
+            takenUpWidth += customActionsColumnWidth;
+        }
+
+        let definedColWidths = {};
+
+        columns.forEach((column, index) => {
+            if (column.hasOwnProperty("width")) {
+                definedColWidths[column.dataSourceAttributeName] = column.width;
+            }
+
+            if (column.hasOwnProperty("minWidth")) {
+                columns[index].minWidth = column.minWidth;
+            } else {
+                columns[index].minWidth = "1px";
+            }
+
+            if (column.hasOwnProperty("maxWidth")) {
+                columns[index].maxWidth = column.maxWidth;
+            } else {
+                columns[index].maxWidth = "1px";
+            }
+        });
+
+        // Set all undefined column widths to the minimum defined width
+        columns.forEach((column, index) => {
+            if (!column.hasOwnProperty("width")) {
+                columns[index].width = Math.min(...Object.values(definedColWidths));
+            }
+        });
+
+        let sumOfColumnDataColumnWidths = columns.reduce(function (acc, column) {
+            return acc + column.width;
+        }, 0);
+
+        let allocatedDataColumnWidth = 100 - takenUpWidth;
+        // Create widths according to ratio of defined width entries, constrained into defined data column width allocation
+        columns.forEach((column, index) => {
+            columns[index].width = (allocatedDataColumnWidth * columns[index].width) / sumOfColumnDataColumnWidths;
+            takenUpWidth += columns[index].width;
+        });
+    };
+    //#endregion
+</script>
+
+<div>
+    <!-- #region Top Buttons -->
+    <div bind:clientHeight={topButtonsHeight}>
+        <div class="mb-2 flex w-full lg:hidden">
+            {#if enableFilters}
+                <div class="my-auto">
+                    <button on:click={() => (showFilters = !showFilters)} class="btn btn-link btn-xs my-auto mr-2 pl-0">
+                        <span class:hidden={showFilters}>Show Filters</span>
+                        <span class:hidden={!showFilters}>Hide Filters</span>
+                    </button>
+                </div>
+            {/if}
+            <div class="my-auto ml-auto flex flex-row">
+                <span class="badge my-auto border-base-300 bg-base-300 text-base-content">
+                    {#if totalItemCount === undefined}
+                        ... items
+                    {:else}
+                        {totalItemCount} {totalItemCount > 1 || totalItemCount === 0 ? " items" : "item"}
+                    {/if}
+                </span>
+                <div class="btn-group ml-2 {!enableNewButton ? 'hidden' : ''} sm:flex">
+                    {#if enableNewButton}
+                        <button
+                            class="btn btn-primary btn-sm {newButtonOptions.hasOwnProperty('btnClasses')
+                                ? newButtonOptions.btnClasses
+                                : ''}"
+                            on:click={() => {
+                                let clickEvent = newButtonOptions.hasOwnProperty("clickEvent")
+                                    ? newButtonOptions.clickEvent
+                                    : "add_new_clicked";
+                                actionTriggered({ clickEvent: clickEvent });
+                            }}>
+                            {#if newButtonOptions.hasOwnProperty("faIcon")}
+                                <Fa
+                                    icon={newButtonOptions.faIcon}
+                                    size="1x"
+                                    class={newButtonOptions.hasOwnProperty("faClasses")
+                                        ? newButtonOptions.faClasses
+                                        : ""} />
+                            {/if}
+                            {#if newButtonOptions.hasOwnProperty("displayLabel")}
+                                <span class="hidden sm:flex">{newButtonOptions.displayLabel}</span>
+                            {/if}
+                        </button>
+                    {:else}
+                        <button
+                            class="btn btn-sm"
+                            on:click={async () => {
+                                if (postBody.pageNumber >= 1 && !isLoading) {
+                                    await handlePaginate(postBody.pageNumber - 1);
+                                }
+                            }}
+                            >«
+                        </button>
+                        <Dropdown
+                            dropDownText="Page {postBody.pageNumber + 1}"
+                            dropDownOptions={paginationOptions}
+                            dropdownClasses="dropdown-end"
+                            btnClasses="rounded-none"
+                            loading={requestPendingStates.pagination.loading}
+                            on:optionSelected={async (params) =>
+                                await handlePaginate(parseInt(params.detail.params.pageNumber))} />
+                        <button
+                            class="btn btn-sm"
+                            on:click={async () => {
+                                if (postBody.pageNumber < totalPagesCount - 1 && !isLoading) {
+                                    await handlePaginate(postBody.pageNumber + 1);
+                                }
+                            }}
+                            >»
+                        </button>
+                    {/if}
+                </div>
+            </div>
+        </div>
+        <div class="mb-2 flex w-full">
+            {#if enableGlobalSearch === true}
+                <div class="form-control my-auto mr-2 w-80 lg:w-80">
+                    <div class="relative -mb-2">
+                        <input
+                            type="text"
+                            bind:value={postBody.searchValue}
+                            on:keypress={async (event) => {
+                                if (isLoading) {
+                                    return;
+                                }
+                                if (event.keyCode === 13) {
+                                    await handleGeneralStates("globalSearch");
+                                }
+                            }}
+                            on:change={async () => {
+                                if (isLoading) {
+                                    return;
+                                }
+                                await handleGeneralStates("globalSearch");
+                            }}
+                            on:focus={(event) => {
+                                event.target.select();
+                                requestPendingStates.globalSearch.visible = true;
+                            }}
+                            on:blur={(event) => {
+                                if (
+                                    !requestPendingStates.globalSearch.loading &&
+                                    event.relatedTarget !== event.currentTarget.parentNode.lastChild
+                                ) {
+                                    requestPendingStates.globalSearch.visible = false;
+                                }
+                            }}
+                            placeholder="Search..."
+                            class="input-bordered input input-sm w-full pr-16" />
+                        {#if requestPendingStates.globalSearch.loading || requestPendingStates.globalSearch.visible}
+                            <button
+                                transition:fly={{ x: 10, duration: 250 }}
+                                class:loading={requestPendingStates.globalSearch.loading}
+                                class="custom-btn-loading btn btn-primary btn-sm absolute top-0 right-0 mr-0 rounded-l-none"
+                                on:click={async () => {
+                                    if (isLoading) {
+                                        return;
+                                    }
+                                    requestPendingStates.globalSearch.visible = true;
+                                    await handleGeneralStates("globalSearch");
+                                    requestPendingStates.globalSearch.visible = false;
+                                }}>
+                                <span class:hidden={requestPendingStates.globalSearch.loading}>
+                                    <Fa icon={faMagnifyingGlass} size="1.1x" />
+                                </span>
+                            </button>
+                        {/if}
+                    </div>
+                </div>
+            {/if}
+            {#if enableRefresh === true}
+                <button
+                    class="custom-btn-loading btn btn-sm my-auto ml-auto lg:ml-0"
+                    class:loading={requestPendingStates.refresh.loading}
+                    on:click={async () => {
+                        if (isLoading) {
+                            return;
+                        }
+                        await resetPostBody();
+                        await handleGeneralStates("refresh");
+                    }}>
+                    <span class:hidden={requestPendingStates.refresh.loading}>
+                        <Fa icon={faTimes} size="1.1x" />
+                    </span>
+                </button>
+            {/if}
+            <div class="hidden lg:ml-auto lg:flex">
+                {#if Object.keys(multiSelectActions).length > 0 && Object.values(selectedRows).some((value) => value === true)}
+                    <span class="mr-2">
+                        <Dropdown
+                            loading={false}
+                            dropdownClasses="dropdown-end"
+                            dropDownText="Options"
+                            dropDownOptions={multiSelectActions}
+                            on:optionSelected={(params) => handleMultiSelect(params)} />
+                    </span>
+                {/if}
+                {#if enableFilters}
+                    <button on:click={() => (showFilters = !showFilters)} class="btn btn-link btn-xs my-auto mr-2">
+                        <span class:hidden={showFilters}>Show Filters</span>
+                        <span class:hidden={!showFilters}>Hide Filters</span>
+                    </button>
+                {/if}
+                <div class="my-auto ml-auto flex flex-row">
+                    <span class="badge my-auto mr-2 border-base-300 bg-base-300 text-base-content">
+                        {#if totalItemCount === undefined}
+                            ... items
+                        {:else}
+                            {totalItemCount} {totalItemCount > 1 || totalItemCount === 0 ? " items" : "item"}
+                        {/if}
+                    </span>
+
+                    <div class="btn-group">
+                        {#if enableNewButton}
+                            <button
+                                class="btn btn-primary btn-sm {newButtonOptions.hasOwnProperty('btnClasses')
+                                    ? newButtonOptions.btnClasses
+                                    : ''}"
+                                on:click={() => {
+                                    let clickEvent = newButtonOptions.hasOwnProperty("clickEvent")
+                                        ? newButtonOptions.clickEvent
+                                        : "add_new_clicked";
+                                    actionTriggered({ clickEvent: clickEvent });
+                                }}>
+                                {#if newButtonOptions.hasOwnProperty("faIcon")}
+                                    <Fa
+                                        icon={newButtonOptions.faIcon}
+                                        size="1.1x"
+                                        class={newButtonOptions.hasOwnProperty("faClasses")
+                                            ? newButtonOptions.faClasses
+                                            : ""} />
+                                {/if}
+                                {#if newButtonOptions.hasOwnProperty("displayLabel")}
+                                    <span class="hidden xs:flex">{newButtonOptions.displayLabel}</span>
+                                {/if}
+                            </button>
+                        {:else}
+                            <button
+                                class="btn btn-sm"
+                                on:click={async () => {
+                                    if (postBody.pageNumber >= 1 && !isLoading) {
+                                        await handlePaginate(postBody.pageNumber - 1);
+                                    }
+                                }}
+                                >«
+                            </button>
+                            <Dropdown
+                                dropdownClasses="dropdown-end"
+                                dropDownText="Page {postBody.pageNumber + 1}"
+                                dropDownOptions={paginationOptions}
+                                btnClasses="rounded-none"
+                                loading={requestPendingStates.pagination.loading}
+                                on:optionSelected={async (params) =>
+                                    await handlePaginate(parseInt(params.detail.params.pageNumber))} />
+                            <button
+                                class="btn btn-sm"
+                                on:click={async () => {
+                                    if (postBody.pageNumber < totalPagesCount - 1 && !isLoading) {
+                                        await handlePaginate(postBody.pageNumber + 1);
+                                    }
+                                }}
+                                >»
+                            </button>
+                        {/if}
+                    </div>
+                </div>
+            </div>
+            <div class="lg:hidden">
+                {#if Object.keys(multiSelectActions).length > 0 && Object.values(selectedRows).some((value) => value === true)}
+                    <Dropdown
+                        loading={false}
+                        dropDownIcon={faBars}
+                        dropDownText=""
+                        dropDownOptions={multiSelectActions}
+                        dropdownClasses={"dropdown-end ml-2"}
+                        on:optionSelected={(params) => handleMultiSelect(params)} />
+                {/if}
+            </div>
+        </div>
+    </div>
+    <!-- #endregion -->
+
+    <!-- #region Table -->
+    <div class="w-full overflow-x-auto">
+        <table class="table-zebra table w-full border-base-300" style="min-width: {tableMinWidth};">
+            <thead class="table w-full" bind:clientHeight={headerHeight}>
+                <tr class="child:bg-base-300">
+                    {#if enableMultiSelect === true}
+                        <th
+                            class="sticky text-center align-middle"
+                            style="width:{multiActionsColumnWidth}%; min-width:{multiActionsColumnMinWidth}%;">
+                            <label>
+                                <input
+                                    bind:checked={allSelected}
+                                    disabled={isLoading}
+                                    on:change={(event) => updateSelected(event.target.checked)}
+                                    type="checkbox"
+                                    class="checkbox checkbox-sm relative top-[-1px]" />
+                            </label>
+                        </th>
+                    {/if}
+
+                    {#each columns as column, index}
+                        <th
+                            class="align-top"
+                            style="width: {column.width}%;
+                                min-width: {column.minWidth};
+                                max-width:calc({column.maxWidth});">
+                            <button
+                                on:click={async () => handleSortBy(column.dataSourceAttributeName)}
+                                class="btn btn-link  btn-xs pl-0 text-base-content"
+                                class:py-0={!showFilters}
+                                class:text-success={sortBy === column.dataSourceAttributeName}>
+                                <span
+                                    class="inline-block align-middle"
+                                    class:mr-2={sortBy === column.dataSourceAttributeName}>
+                                    {column.columnHeading}
+                                </span>
+                                <span
+                                    class="inline-block align-middle"
+                                    class:hidden={sortBy !== column.dataSourceAttributeName}>
+                                    <Fa
+                                        icon={faAngleDown}
+                                        size="1.4x"
+                                        rotate={rotateDegrees[
+                                            postBody.columns[column.dataSourceAttributeName].isSortAscending ? 1 : 0
+                                        ]} />
+                                </span>
+                            </button>
+
+                            {#if column.hasOwnProperty("filterBy")}
+                                {#each Object.entries(column.filterBy) as [filterName, filterInfo]}
+                                    <div class:hidden={!showFilters} class="mt-1 transition-all">
+                                        <div class="form-control my-auto">
+                                            <div class="relative flex">
+                                                {#if filterInfo.hasOwnProperty("label")}
+                                                    <span class="mt-1 w-9 capitalize">
+                                                        {filterInfo.label}
+                                                    </span>
+                                                {/if}
+                                                {#if filterName === "filterText"}
+                                                    <input
+                                                        type="text"
+                                                        bind:value={postBody.columns[column.dataSourceAttributeName]
+                                                            .filterBy[filterName]}
+                                                        on:keypress={async (event) => {
+                                                            if (event.keyCode === 13) {
+                                                                await handleFilterBy(
+                                                                    column.dataSourceAttributeName,
+                                                                    filterName
+                                                                );
+                                                            }
+                                                        }}
+                                                        on:change={async () => {
+                                                            await handleFilterBy(
+                                                                column.dataSourceAttributeName,
+                                                                filterName
+                                                            );
+                                                        }}
+                                                        on:focus={(event) => {
+                                                            event.target.select();
+                                                            requestPendingStates.filters[
+                                                                column.dataSourceAttributeName
+                                                            ][filterName].visible = true;
+                                                        }}
+                                                        on:blur={(event) => {
+                                                            if (
+                                                                !requestPendingStates.filters[
+                                                                    column.dataSourceAttributeName
+                                                                ][filterName].loading &&
+                                                                event.relatedTarget !==
+                                                                    event.currentTarget.parentNode.lastChild
+                                                            ) {
+                                                                requestPendingStates.filters[
+                                                                    column.dataSourceAttributeName
+                                                                ][filterName].visible = false;
+                                                            }
+                                                        }}
+                                                        placeholder={filterInfo.placeholder}
+                                                        class="input-bordered input input-xs mb-0 w-full grow " />
+                                                {:else if filterName === "filterNumber"}
+                                                    <input
+                                                        type="text"
+                                                        bind:value={postBody.columns[column.dataSourceAttributeName]
+                                                            .filterBy[filterName]}
+                                                        on:keypress={async (event) => {
+                                                            disableNonNumericInput(event);
+                                                            if (event.keyCode === 13) {
+                                                                await handleFilterBy(
+                                                                    column.dataSourceAttributeName,
+                                                                    filterName
+                                                                );
+                                                            }
+                                                        }}
+                                                        on:change={async () => {
+                                                            await handleFilterBy(
+                                                                column.dataSourceAttributeName,
+                                                                filterName
+                                                            );
+                                                        }}
+                                                        on:focus={(event) => {
+                                                            event.target.select();
+                                                            requestPendingStates.filters[
+                                                                column.dataSourceAttributeName
+                                                            ][filterName].visible = true;
+                                                        }}
+                                                        on:blur={(event) => {
+                                                            if (
+                                                                !requestPendingStates.filters[
+                                                                    column.dataSourceAttributeName
+                                                                ][filterName].loading &&
+                                                                event.relatedTarget !==
+                                                                    event.currentTarget.parentNode.lastChild
+                                                            ) {
+                                                                requestPendingStates.filters[
+                                                                    column.dataSourceAttributeName
+                                                                ][filterName].visible = false;
+                                                            }
+                                                        }}
+                                                        placeholder={filterInfo.placeholder}
+                                                        class="input-bordered input input-xs mb-0 w-full grow" />
+                                                {:else if filterName === "filterDropdown"}
+                                                    <select
+                                                        bind:value={postBody.columns[column.dataSourceAttributeName]
+                                                            .filterBy[filterName]}
+                                                        on:change={async () => {
+                                                            await handleFilterBy(
+                                                                column.dataSourceAttributeName,
+                                                                filterName
+                                                            );
+                                                        }}
+                                                        class="select-bordered select select-xs mb-0 grow pr-8">
+                                                        <option selected value="">{filterInfo.placeholder}</option>
+                                                        {#each filterInfo.defaultOptions as value}
+                                                            <option {value}>{value}</option>
+                                                        {/each}
+                                                    </select>
+                                                {:else if filterName === "fromDate" || filterName === "toDate"}
+                                                    <input
+                                                        type="date"
+                                                        bind:value={postBody.columns[column.dataSourceAttributeName]
+                                                            .filterBy[filterName]}
+                                                        on:change={async () => {
+                                                            await handleFilterBy(
+                                                                column.dataSourceAttributeName,
+                                                                filterName
+                                                            );
+                                                        }}
+                                                        on:focus={(event) => {
+                                                            event.target.select();
+                                                            requestPendingStates.filters[
+                                                                column.dataSourceAttributeName
+                                                            ][filterName].visible = true;
+                                                        }}
+                                                        class="input input-xs mb-0 grow"
+                                                        placeholder={filterInfo.placeholder} />{/if}
+                                                {#if ["fromDate", "toDate", "filterDropdown"].includes(filterName)}
+                                                    {#if requestPendingStates.filters[column.dataSourceAttributeName][filterName].loading}
+                                                        <button
+                                                            transition:fly={{ x: 8, duration: 250 }}
+                                                            class:loading={requestPendingStates.filters[
+                                                                column.dataSourceAttributeName
+                                                            ][filterName].loading}
+                                                            class="custom-btn-loading btn btn-primary btn-xs absolute top-0 right-0 mr-0 rounded-l-none"
+                                                            on:click={async () => {
+                                                                requestPendingStates.filters[
+                                                                    column.dataSourceAttributeName
+                                                                ][filterName].visible = true;
+                                                                await handleFilterBy(
+                                                                    column.dataSourceAttributeName,
+                                                                    filterName
+                                                                );
+                                                                requestPendingStates.filters[
+                                                                    column.dataSourceAttributeName
+                                                                ][filterName].visible = false;
+                                                            }}>
+                                                            <span
+                                                                class:hidden={requestPendingStates.filters[
+                                                                    column.dataSourceAttributeName
+                                                                ][filterName].loading}>
+                                                                <Fa icon={faCheck} size="1.1x" />
+                                                            </span>
+                                                        </button>
+                                                    {/if}
+                                                {:else if requestPendingStates.filters[column.dataSourceAttributeName][filterName].visible}
+                                                    <button
+                                                        transition:fly={{ x: 8, duration: 250 }}
+                                                        class:loading={requestPendingStates.filters[
+                                                            column.dataSourceAttributeName
+                                                        ][filterName].loading}
+                                                        class="custom-btn-loading btn btn-primary btn-xs absolute top-0 right-0 mr-0 rounded-l-none"
+                                                        on:click={async () => {
+                                                            requestPendingStates.filters[
+                                                                column.dataSourceAttributeName
+                                                            ][filterName].visible = true;
+                                                            await handleFilterBy(
+                                                                column.dataSourceAttributeName,
+                                                                filterName
+                                                            );
+                                                            requestPendingStates.filters[
+                                                                column.dataSourceAttributeName
+                                                            ][filterName].visible = false;
+                                                        }}>
+                                                        <span
+                                                            class:hidden={requestPendingStates.filters[
+                                                                column.dataSourceAttributeName
+                                                            ][filterName].loading}>
+                                                            <Fa icon={faCheck} size="1.1x" />
+                                                        </span>
+                                                    </button>
+                                                {/if}
+                                            </div>
+                                        </div>
+                                    </div>
+                                {/each}
+                            {/if}
+                        </th>
+                    {/each}
+
+                    {#if Object.keys(customActions).length > 1}
+                        <th
+                            class="align-top"
+                            style="width:{customActionsColumnWidth}%; min-width:{customActionsColumnMinWidth}%;">
+                            <span class="inline-block">
+                                <span class="mr-2 inline-block align-middle">
+                                    {customActions.columnHeading}
+                                </span>
+                            </span>
+                        </th>
+                    {/if}
+                </tr>
+            </thead>
+
+            <tbody
+                class="minimal-scrollbar block overflow-y-auto"
+                style="max-height: calc(100vh - {tableHeightPadding} - {headerHeight}px - {topButtonsHeight}px);">
+                {#if !isLoading}
+                    {#if noResultsFound}
+                        <tr class="table w-full text-center">
+                            <td class="text-center" colspan={Object.keys(postBody.columns).length}>
+                                No results found
+                            </td>
+                        </tr>
+                    {:else}
+                        {#each currentPage as row}
+                            <tr
+                                class="group table w-full"
+                                on:click={(event) => {
+                                    if (clickableColumn === undefined) {
+                                        handleRowClick(event, row.id);
+                                    }
+                                }}>
+                                {#if enableMultiSelect === true}
+                                    <th
+                                        class="text-center align-middle group-hover:bg-base-300/80 {clickableColumn ===
+                                        undefined
+                                            ? 'group-hover:cursor-pointer'
+                                            : ''}"
+                                        style="width:{multiActionsColumnWidth}%; min-width:{multiActionsColumnMinWidth}%;">
+                                        <label>
+                                            <input
+                                                on:click={(event) => {
+                                                    event.stopPropagation();
+                                                }}
+                                                on:change={(event) => {
+                                                    if (!event.target.checked) {
+                                                        allSelected = false;
+                                                    }
+                                                }}
+                                                bind:checked={selectedRows[row.id]}
+                                                type="checkbox"
+                                                class="checkbox checkbox-sm relative top-[-1px] align-middle" />
+                                        </label>
+                                    </th>
+                                {/if}
+                                {#each columns as column, index}
+                                    {#if column.dataSourceAttributeName !== "id"}
+                                        {#if columns[index].dataSourceAttributeName === clickableColumn}
+                                            <td
+                                                class="overflow-hidden group-hover:bg-base-300/80 {clickableColumn ===
+                                                undefined
+                                                    ? 'group-hover:cursor-pointer'
+                                                    : ''}"
+                                                style="width: {columns[index].width}%;
+                                            min-width: {columns[index].minWidth};
+                                            max-width: calc({columns[index].maxWidth});">
+                                                <span
+                                                    class="text-nowrap inline-block overflow-hidden overflow-ellipsis"
+                                                    style="max-width:100%;">
+                                                    <button
+                                                        on:click={(event) => handleRowClick(event, row.id)}
+                                                        class="btn btn-link btn-xs text-base-content  underline">
+                                                        {row[column.dataSourceAttributeName]}
+                                                    </button>
+                                                </span>
+                                            </td>
+                                        {:else}
+                                            <td
+                                                class="overflow-hidden group-hover:bg-base-300/80 {clickableColumn ===
+                                                undefined
+                                                    ? 'group-hover:cursor-pointer'
+                                                    : ''}"
+                                                style="width: {columns[index].width}%;
+                                            min-width: {columns[index].minWidth};
+                                            max-width: calc({columns[index].maxWidth});">
+                                                <div
+                                                    class="text-nowrap inline-block  overflow-hidden overflow-ellipsis align-middle"
+                                                    style="max-width:calc(100%);">
+                                                    {@html row[column.dataSourceAttributeName]}
+                                                </div>
+                                            </td>
+                                        {/if}
+                                    {/if}
+                                {/each}
+
+                                {#if Object.keys(customActions).length > 1}
+                                    <td
+                                        class="group-hover:bg-base-300/80 {clickableColumn === undefined
+                                            ? 'group-hover:cursor-pointer'
+                                            : ''}"
+                                        style="width:{customActionsColumnWidth}%; min-width:{customActionsColumnMinWidth}%;">
+                                        <div class="flex align-middle">
+                                            {#each customActions.actions as action}
+                                                <button
+                                                    class="btn btn-xs mr-1 flex-nowrap {action.btnClasses}"
+                                                    on:click={(event) =>
+                                                        handleCustomActionClick(event, action.clickEvent, row.id)}>
+                                                    {#if action.faIcon === "faEye"}
+                                                        <Fa icon={faEye} size="1.1x" />
+                                                    {:else if action.faIcon === "faTrash"}
+                                                        <Fa icon={faTrash} size="1.1x" />
+                                                    {:else if action.faIcon === "faEdit"}
+                                                        <Fa icon={faEdit} size="1.1x" />
+                                                    {/if}
+
+                                                    {#if action.hasOwnProperty("displayLabel")}
+                                                        <span class="ml-1">{action.displayLabel}</span>
+                                                    {/if}
+                                                </button>
+                                            {/each}
+                                        </div>
+                                    </td>
+                                {/if}
+                            </tr>
+                        {/each}
+                    {/if}
+                {:else}
+                    {#each Array(parseInt(postBody.itemsPerPage)) as _, index}
+                        <tr class="group table w-full">
+                            {#if enableMultiSelect === true}
+                                <th
+                                    class="sticky animate-pulse text-center align-middle"
+                                    style="width:{multiActionsColumnWidth}%; min-width:{multiActionsColumnMinWidth}%;">
+                                    <label>
+                                        <input
+                                            type="checkbox"
+                                            class="checkbox checkbox-sm relative top-[-1px] align-middle"
+                                            disabled />
+                                    </label>
+                                </th>
+                            {/if}
+
+                            {#each Object.entries(columns) as [columnName, columnValue]}
+                                {#if columnName !== "id"}
+                                    {#if clickableColumn !== undefined && columnName === clickableColumn}
+                                        <td
+                                            class="animate-pulse"
+                                            style="width: {columns[columnName].width}%;
+                                                min-width: {columns[columnName].minWidth};
+                                                max-width: calc({columns[columnName].maxWidth});">
+                                            <button
+                                                class="btn btn-link btn-xs bg-opacity-100 text-base-content text-opacity-50 underline hover:cursor-default" />
+                                        </td>
+                                    {:else}
+                                        <td
+                                            class="animate-pulse text-center text-base-content text-opacity-50"
+                                            style="width: {columns[columnName].width}%;
+                                                min-width: {columns[columnName].minWidth};
+                                                max-width: calc({columns[columnName].maxWidth});">
+                                            <div
+                                                class="text-nowrap inline-block overflow-hidden rounded-lg border-opacity-50 bg-base-300 bg-opacity-100 align-middle text-transparent"
+                                                style="width: calc(100%);">
+                                                Loading...
+                                            </div>
+                                        </td>
+                                    {/if}
+                                {/if}
+                            {/each}
+
+                            {#if Object.keys(customActions).length > 1}
+                                <td
+                                    class="animate-pulse"
+                                    style="width:{customActionsColumnWidth}%; min-width:{customActionsColumnMinWidth}%;">
+                                    <div class="flex align-middle">
+                                        {#each customActions.actions as action}
+                                            <button
+                                                class="btn btn-ghost btn-xs relative mr-1 flex-nowrap justify-center bg-base-300 bg-opacity-100 text-transparent">
+                                                {#if action.faIcon === "faEye"}
+                                                    <Fa icon={faEye} size="1.1x" />
+                                                {:else if action.faIcon === "faTrash"}
+                                                    <Fa icon={faTrash} size="1.1x" />
+                                                {:else if action.faIcon === "faEdit"}
+                                                    <Fa icon={faEdit} size="1.1x" />
+                                                {/if}
+
+                                                {#if action.hasOwnProperty("displayLabel")}
+                                                    <span class="ml-1">{action.displayLabel}</span>
+                                                {/if}
+                                            </button>
+                                        {/each}
+                                    </div>
+                                </td>
+                            {/if}
+                        </tr>
+                    {/each}
+                {/if}
+            </tbody>
+
+            {#if Object.keys(footerColumns).length !== 0}
+                <tfoot class="table w-full">
+                    <tr class="table w-full child:bg-base-300">
+                        {#if enableMultiSelect}
+                            <th class="sticky" />
+                        {/if}
+                        {#each columns as column}
+                            <th>
+                                {#if typeof footerColumns[column.dataSourceAttributeName] !== "undefined"}
+                                    {footerColumns[column.dataSourceAttributeName]}
+                                {/if}
+                            </th>
+                        {/each}
+                        {#if Object.keys(customActions).length > 1}
+                            <th />
+                        {/if}
+                    </tr>
+                </tfoot>
+            {/if}
+        </table>
+    </div>
+    <!-- #endregion -->
+
+    <!-- #region Bottom Buttons -->
+    <div class="xs:hidden">
+        <div class="mx-auto mt-2">
+            <div class="btn-group justify-center">
+                <button
+                    class="btn btn-sm"
+                    on:click={async () => {
+                        if (postBody.pageNumber >= 1) {
+                            await handlePaginate(postBody.pageNumber - 1);
+                        }
+                    }}
+                    >«
+                </button>
+                <Dropdown
+                    dropDownText="Page {postBody.pageNumber + 1}"
+                    dropDownOptions={paginationOptions}
+                    dropdownClasses="dropdown-top dropdown-end"
+                    btnClasses="rounded-none"
+                    loading={requestPendingStates.pagination.loading}
+                    on:optionSelected={async (params) =>
+                        await handlePaginate(parseInt(params.detail.params.pageNumber))} />
+                <button
+                    class="btn btn-sm"
+                    on:click={async () => {
+                        if (postBody.pageNumber < totalPagesCount - 1) {
+                            await handlePaginate(postBody.pageNumber + 1);
+                        }
+                    }}
+                    >»
+                </button>
+            </div>
+        </div>
+        <div class="mx-auto mt-2">
+            <div class="flex justify-center">
+                <div class="btn btn-sm" class:hidden={editingLimit} on:click={() => (editingLimit = true)}>
+                    Items per Page: {postBody.itemsPerPage}
+                </div>
+                <div class="form-control w-36" class:hidden={!editingLimit}>
+                    <div class="relative">
+                        <input
+                            bind:value={postBody.itemsPerPage}
+                            on:keypress={async (event) => {
+                                disableNonNumericInput(event);
+                                if (event.keyCode === 13) {
+                                    postBody.pageNumber = pageNumber;
+                                    await handleGeneralStates("editLimit");
+                                    editingLimit = false;
+                                }
+                            }}
+                            on:change={async (event) => {
+                                console.log(event);
+                                console.log(event.currentTarget);
+
+                                // postBody.pageNumber = pageNumber;
+                                // await handleGeneralStates("editLimit");
+                                // editingLimit = false;
+                            }}
+                            on:blur={(event) => {
+                                if (
+                                    !requestPendingStates.editLimit.loading &&
+                                    event.relatedTarget !== event.currentTarget.parentNode.lastChild
+                                ) {
+                                    requestPendingStates.editLimit.visible = false;
+                                }
+                            }}
+                            type="text"
+                            on:focus={(event) => {
+                                event.target.select();
+                                requestPendingStates.editLimit.visible = true;
+                            }}
+                            placeholder="25"
+                            class="input-bordered input input-sm w-full pr-16" />
+                        {#if requestPendingStates.editLimit.loading || requestPendingStates.editLimit.visible}
+                            <button
+                                class="custom-btn-loading btn btn-primary btn-sm absolute top-0 right-0 rounded-l-none"
+                                class:loading={requestPendingStates.editLimit.loading}
+                                transition:fly={{ x: 10, duration: 250 }}
+                                on:click={async () => {
+                                    postBody.pageNumber = pageNumber;
+                                    await handleGeneralStates("editLimit");
+                                    editingLimit = false;
+                                }}>
+                                <span class:hidden={requestPendingStates.editLimit.loading}>
+                                    <Fa icon={faCheck} size="1.1x" />
+                                </span>
+                            </button>
+                        {/if}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="mt-2 hidden w-full xs:flex xs:justify-between">
+        <div class="mr-auto">
+            <div class="btn btn-sm" class:hidden={editingLimit} on:click={() => (editingLimit = true)}>
+                Items per Page: {postBody.itemsPerPage}
+            </div>
+            <div class="form-control w-36" class:hidden={!editingLimit}>
+                <div class="relative">
+                    <input
+                        bind:value={postBody.itemsPerPage}
+                        on:keypress={async (event) => {
+                            console.log("keypress");
+
+                            disableNonNumericInput(event);
+                            if (event.keyCode === 13) {
+                                postBody.pageNumber = pageNumber;
+                                await handleGeneralStates("editLimit");
+                                editingLimit = false;
+                            }
+                        }}
+                        on:change={async () => {
+                            console.log("change");
+
+                            // if (editingLimit) {
+                            //     console.log("editing limit set to false");
+
+                            //     editingLimit = false;
+                            //     return;
+                            // }
+                            postBody.pageNumber = pageNumber;
+                            await handleGeneralStates("editLimit");
+                        }}
+                        on:blur={(event) => {
+                            if (
+                                !requestPendingStates.editLimit.loading &&
+                                event.relatedTarget !== event.currentTarget.parentNode.lastChild
+                            ) {
+                                requestPendingStates.editLimit.visible = false;
+                            }
+                        }}
+                        type="text"
+                        on:focus={(event) => {
+                            event.target.select();
+                            requestPendingStates.editLimit.visible = true;
+                        }}
+                        placeholder="25"
+                        class="input-bordered input input-sm w-full pr-16" />
+                    {#if requestPendingStates.editLimit.loading || requestPendingStates.editLimit.visible}
+                        <button
+                            class="custom-btn-loading btn btn-primary btn-sm absolute top-0 right-0 rounded-l-none"
+                            class:loading={requestPendingStates.editLimit.loading}
+                            transition:fly={{ x: 10, duration: 250 }}
+                            on:click={async () => {
+                                postBody.pageNumber = pageNumber;
+                                await handleGeneralStates("editLimit");
+                                editingLimit = false;
+                            }}>
+                            <span class:hidden={requestPendingStates.editLimit.loading}>
+                                <Fa icon={faCheck} size="1.1x" />
+                            </span>
+                        </button>
+                    {/if}
+                </div>
+            </div>
+        </div>
+        <div class="btn-group ml-auto">
+            <button
+                class="btn btn-sm"
+                on:click={async () => {
+                    if (postBody.pageNumber >= 1) {
+                        await handlePaginate(postBody.pageNumber - 1);
+                    }
+                }}
+                >«
+            </button>
+            <Dropdown
+                dropDownText="Page {postBody.pageNumber + 1}"
+                dropDownOptions={paginationOptions}
+                dropdownClasses="dropdown-top dropdown-end"
+                btnClasses="rounded-none"
+                loading={requestPendingStates.pagination.loading}
+                on:optionSelected={async (params) => await handlePaginate(parseInt(params.detail.params.pageNumber))} />
+            <button
+                class="btn btn-sm"
+                on:click={async () => {
+                    if (postBody.pageNumber < totalPagesCount - 1) {
+                        await handlePaginate(postBody.pageNumber + 1);
+                    }
+                }}
+                >»
+            </button>
+        </div>
+    </div>
+    <!-- #endregion  -->
+</div>
+
+<style>
+    .table th:first-child {
+        position: inherit;
+    }
+</style>
