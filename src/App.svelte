@@ -5,6 +5,7 @@
     import ComponentLibrary from "$src/base_components/routes/componentLibrary.svelte";
     import NotFound from "$src/routes/notFound.svelte";
     import Login from "$src/routes/login.svelte";
+    import FlowMetric from "$src/routes/flowMetric.svelte";
     import CreateAccount from "$src/routes/createAccount.svelte";
     import ForgotPassword from "$src/routes/forgotPassword.svelte";
     import ResetPassword from "$src/routes/resetPassword.svelte";
@@ -32,6 +33,7 @@
         "/component-library": ComponentLibrary,
         "/profile": Profile,
         "/notification-onboarding": NotificationOnboarding,
+        "/flowmetric": FlowMetric,
 
         "*": NotFound,
     };
